@@ -1,0 +1,56 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: psygateway_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d
+
+  redis:
+    image: redis:7
+    container_name: psygateway_redis
+    restart: always
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+
+  pgadmin:
+    image: dpage/pgadmin4:8.8
+    container_name: psygateway_pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@psygateway.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+  consul:
+    image: hashicorp/consul:1.15
+    container_name: consul
+    restart: always
+    ports:
+      - "8500:8500"     # Web UI / API
+      - "8600:8600/udp" # DNS interface
+    environment:
+      - CONSUL_BIND_INTERFACE=eth0
+    command: ["consul", "agent", "-server", "-bootstrap", "-ui", "-client=0.0.0.0", "-data-dir=/consul/data"]
+    volumes:
+      - consul_data:/consul/data
+
+volumes:
+  postgres_data:
+  redis_data:
+  pgadmin_data:
+  consul_data:
