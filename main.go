@@ -349,6 +349,10 @@ func main() {
 	host := os.Getenv("POSTGRES_HOST")
 	port := os.Getenv("POSTGRES_PORT")
 	dbname := os.Getenv("POSTGRES_DB")
+	gatewayPort := os.Getenv("GATEWAY_PORT")
+	if gatewayPort == "" {
+		logger.Fatal("GATEWAY_PORT environment variable is not set")
+	}
 
 	// Construct database URL
 	dbURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, dbname)
@@ -363,9 +367,9 @@ func main() {
 	// Set up HTTP server
 	http.HandleFunc("/", gateway.handleRequest)
 
-	logger.Info("Starting gateway server on :8000")
+	logger.Info("Starting gateway server on :", gatewayPort)
 
-	if err := http.ListenAndServe(":8000", nil); err != nil {
+	if err := http.ListenAndServe(":"+gatewayPort, nil); err != nil {
 		logger.Fatal("Server failed to start", err)
 	}
 

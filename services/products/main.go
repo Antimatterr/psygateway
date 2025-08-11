@@ -30,7 +30,7 @@ var db *sql.DB
 
 func init() {
 	// Load environment variables
-	err := godotenv.Load("../../.env")
+	err := godotenv.Load(".env")
 	if err != nil {
 		// Try loading from current directory
 		err = godotenv.Load(".env")
@@ -161,10 +161,14 @@ func main() {
 	http.HandleFunc("/api/products", handleGetProducts)
 	http.HandleFunc("/api/product/", handleGetProductById)
 
-	logger.Info("Starting products service on :3001")
-	if err := http.ListenAndServe(":3001", nil); err != nil {
+	productPort := os.Getenv("PRODUCT_SERVICE_PORT")
+	if productPort == "" {
+		logger.Fatal("PRODUCT_SERVICE_PORT environment variable is not set")
+	}
+	logger.Info("Starting products service on :", productPort)
+	if err := http.ListenAndServe(":"+productPort, nil); err != nil {
 		logger.Fatal("Server failed to start", err)
 	}
 	logger.Info("Products service started successfully")
-	logger.Info("Listening on port 3001")
+	logger.Info("Listening on port", productPort)
 }

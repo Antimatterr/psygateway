@@ -26,7 +26,7 @@ var db *sql.DB
 
 func init() {
 	// Load environment variables
-	err := godotenv.Load("../../.env")
+	err := godotenv.Load(".env")
 	if err != nil {
 		log.Printf("Error loading .env file: %v", err)
 	}
@@ -96,7 +96,12 @@ func getUserByID(w http.ResponseWriter, r *http.Request) {
 func main() {
 	http.HandleFunc("/api/users", getUsers)
 	http.HandleFunc("/api/user/", getUserByID)
-	if err := http.ListenAndServe(":3000", nil); err != nil {
+	userPort := os.Getenv("USER_SERVICE_PORT")
+	if userPort == "" {
+		logger.Fatal("USER_SERVICE_PORT environment variable is not set")
+	}
+
+	if err := http.ListenAndServe(":"+userPort, nil); err != nil {
 		logger.Fatal("Server failed to start", err)
 	}
 }
