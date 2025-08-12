@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Antimatterr/psygateway/internal/discovery"
 	"github.com/Antimatterr/psygateway/internal/logger"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq" // PostgreSQL driver
@@ -26,15 +27,17 @@ type Route struct {
 	CacheTTL     int
 	TargetURL    string
 	Enabled      bool
+	UseConsul    bool
 }
 
 type Gateway struct {
-	db         *sql.DB
-	routes     []Route
-	httpClient *http.Client
+	db               *sql.DB
+	routes           []Route
+	httpClient       *http.Client
+	serviceDiscovery *discovery.ServiceDiscovery
 }
 
-func NewGateway(dbURL string) (*Gateway, error) {
+func NewGateway(dbURL string, consulAddress string) (*Gateway, error) {
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %v", err)
@@ -49,7 +52,12 @@ func NewGateway(dbURL string) (*Gateway, error) {
 		Timeout: 30 * time.Second,
 	}
 
-	gateway := &Gateway{db: db, httpClient: httpClient}
+	sd, err := discovery.NewServiceDiscovery(consulAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service discovery client: %v", err)
+	}
+
+	gateway := &Gateway{db: db, httpClient: httpClient, serviceDiscovery: sd}
 
 	if err := gateway.loadRoutes(); err != nil {
 		return nil, fmt.Errorf("failed to load routes: %v", err)
@@ -58,10 +66,26 @@ func NewGateway(dbURL string) (*Gateway, error) {
 	return gateway, nil
 }
 
+func (g *Gateway) ResolveTarget(route *Route) (string, error) {
+	if route.UseConsul && route.ServiceName != "" {
+		serviceURL, err := g.serviceDiscovery.GetHealthyService(route.ServiceName)
+		if err != nil {
+			logger.Error("Failed to resolve service via Consul", err)
+			if route.TargetURL != "" {
+				logger.Warn("Using static target URL as fallback", route.TargetURL)
+				return route.TargetURL, nil
+			}
+			return "", err
+		}
+		return serviceURL, nil
+	}
+	return route.TargetURL, nil
+}
+
 func (g *Gateway) loadRoutes() error {
 	query := `
 		SELECT id, path_pattern, service_name, method, auth_required, 
-		       rate_limit, cache_ttl, target_url, enabled
+		       rate_limit, cache_ttl, target_url, enabled, use_consul
 		FROM routes 
 		WHERE enabled = true
 		ORDER BY path_pattern DESC`
@@ -84,7 +108,7 @@ func (g *Gateway) loadRoutes() error {
 	for rows.Next() {
 		var r Route
 		if err := rows.Scan(&r.ID, &r.PathPattern, &r.ServiceName, &r.Method, &r.AuthRequired,
-			&r.RateLimit, &r.CacheTTL, &r.TargetURL, &r.Enabled); err != nil {
+			&r.RateLimit, &r.CacheTTL, &r.TargetURL, &r.Enabled, &r.UseConsul); err != nil {
 			logger.Error("Failed to scan row", err)
 			return fmt.Errorf("failed to scan row: %v", err)
 		}
@@ -217,6 +241,18 @@ func (g *Gateway) shouldSkipHeader(header string) bool {
 
 func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, route *Route) {
 
+	//TODO: Resolve target URL from Consul if needed
+	//do this and resolve from consul
+	// for now localhost will not work for consul so we have to register the service with host.docker.internal
+	//need to deploy the service to docker in same network as of consul to fix this in dev
+	targetUrlFromDiscovery, err := g.ResolveTarget(route)
+
+	logger.Info("Resolved target URL from consul", targetUrlFromDiscovery, "route", route.PathPattern)
+	if err != nil {
+		http.Error(w, "Failed to resolve target URL fromo consul", http.StatusInternalServerError)
+		logger.Error("Failed to resolve target URL consul ", err)
+		return
+	}
 	targetUrl, err := g.buildTargetURL(route.TargetURL, r.URL.Path, route.PathPattern)
 	if err != nil {
 		http.Error(w, "Failed to build target URL", http.StatusInternalServerError)
@@ -225,8 +261,14 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, route *Ro
 	}
 	logger.Info("Proxying request", "Method", r.Method, "Path", r.URL.Path, "Target URL", targetUrl)
 
+	var requestUrl string
+	if targetUrlFromDiscovery != "" {
+		requestUrl = targetUrlFromDiscovery
+	} else {
+		requestUrl = targetUrl
+	}
 	//create new request to backened service
-	proxyRequest, err := http.NewRequest(r.Method, targetUrl, r.Body)
+	proxyRequest, err := http.NewRequest(r.Method, requestUrl, r.Body)
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		logger.Error("Failed to create proxy request", err)
@@ -319,6 +361,10 @@ func (g *Gateway) listRoutes(w http.ResponseWriter) {
 		fmt.Fprintf(w, "Service: %s\n", route.ServiceName)
 		fmt.Fprintf(w, "Auth: %v\n", route.AuthRequired)
 		fmt.Fprintf(w, "Target: %s\n", route.TargetURL)
+		fmt.Fprintf(w, "Use Consul: %v\n", route.UseConsul)
+		fmt.Fprintf(w, "Rate Limit: %d\n", route.RateLimit)
+		fmt.Fprintf(w, "Cache TTL: %d\n", route.CacheTTL)
+		fmt.Fprintf(w, "Enabled: %v\n", route.Enabled)
 		fmt.Fprintf(w, "---\n")
 	}
 }
@@ -350,6 +396,7 @@ func main() {
 	port := os.Getenv("POSTGRES_PORT")
 	dbname := os.Getenv("POSTGRES_DB")
 	gatewayPort := os.Getenv("GATEWAY_PORT")
+	consulAddress := os.Getenv("CONSUL_ADDRESS")
 	if gatewayPort == "" {
 		logger.Fatal("GATEWAY_PORT environment variable is not set")
 	}
@@ -358,7 +405,7 @@ func main() {
 	dbURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, dbname)
 
 	// Create gateway instance
-	gateway, err := NewGateway(dbURL)
+	gateway, err := NewGateway(dbURL, consulAddress)
 	if err != nil {
 		logger.Fatal("Failed to create gateway", err)
 	}

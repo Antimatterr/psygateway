@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
+	"github.com/Antimatterr/psygateway/internal/discovery"
 	"github.com/Antimatterr/psygateway/internal/logger"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -43,19 +48,20 @@ func init() {
 
 	db, err = sql.Open("postgres", dbURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to DB: %v", err)
+		logger.Fatal("Failed to connect to DB", err)
 	}
 	if err = db.Ping(); err != nil {
-		log.Fatalf("Failed to ping DB: %v", err)
+		logger.Fatal("Failed to ping DB", err)
 	}
 
-	log.Printf("Connected to database: %s:%s/%s", host, port, dbname)
+	logger.Info("Connected to database", fmt.Sprintf("%s:%s/%s", host, port, dbname))
 }
 
 func getUsers(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT id, username, email, role, status FROM users")
 	if err != nil {
 		http.Error(w, "Failed to fetch users", http.StatusInternalServerError)
+		logger.Error("Failed to fetch users", err)
 		return
 	}
 	defer rows.Close()
@@ -65,10 +71,12 @@ func getUsers(w http.ResponseWriter, r *http.Request) {
 		var user User
 		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.Status); err != nil {
 			http.Error(w, "Failed to scan user", http.StatusInternalServerError)
+			logger.Error("Failed to scan user", err)
 			return
 		}
 		users = append(users, user)
 	}
+	logger.Info("Fetched users", fmt.Sprintf("Count: %d", len(users)))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(users)
 }
@@ -78,30 +86,88 @@ func getUserByID(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		logger.Error("Invalid user ID", err)
 		return
 	}
 	var user User
 	err = db.QueryRow("SELECT id, username, email, role, status FROM users WHERE id=$1", id).Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.Status)
 	if err == sql.ErrNoRows {
 		http.Error(w, "User not found", http.StatusNotFound)
+		logger.Error("User not found", fmt.Errorf("user ID %d does not exist", id))
 		return
 	} else if err != nil {
 		http.Error(w, "Failed to fetch user", http.StatusInternalServerError)
+		logger.Error("Failed to fetch user", err)
 		return
 	}
+	logger.Info("Fetched user", fmt.Sprintf("ID: %d, Username: %s", user.ID, user.Username))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(user)
+}
+
+func healthCheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	logger.Info("Health check", "User service is running")
 }
 
 func main() {
 	http.HandleFunc("/api/users", getUsers)
 	http.HandleFunc("/api/user/", getUserByID)
+	http.HandleFunc("/api/user/health", healthCheck)
+
 	userPort := os.Getenv("USER_SERVICE_PORT")
+	consulAddress := os.Getenv("CONSUL_ADDRESS")
+
+	//service discovery client
+	sd, err := discovery.NewServiceDiscovery(consulAddress)
+
+	if err != nil {
+		logger.Fatal("Failed to create service discovery client", err)
+	}
+
+	// Register this service with Consul
+	err = sd.RegisterService(
+		"user-service",
+		// "host.docker.internal", // Use host.docker.internal for Docker compatibility
+		"user-service",
+		3000,
+		"/api/user/health",
+	)
+	if err != nil {
+		logger.Fatal("Failed to register user service with Consul", err)
+	}
+	logger.Info("User service registered with Consul")
+
 	if userPort == "" {
 		logger.Fatal("USER_SERVICE_PORT environment variable is not set")
 	}
 
-	if err := http.ListenAndServe(":"+userPort, nil); err != nil {
+	// Create HTTP server
+	server := &http.Server{Addr: ":" + userPort}
+
+	// Handle graceful shutdown
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+
+		logger.Info("Shutting down user service...")
+
+		// Deregister from Consul
+		if err := sd.DeregisterService("user-service"); err != nil {
+			logger.Error("Failed to deregister service", err)
+		}
+
+		// Shutdown server
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	}()
+
+	logger.Info("Starting user service", "port", userPort)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Fatal("Server failed to start", err)
 	}
+
 }

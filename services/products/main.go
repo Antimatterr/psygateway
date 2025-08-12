@@ -157,9 +157,16 @@ func handleGetProductById(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(product)
 }
 
+func healthCheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	logger.Info("Health check", "Product service is running")
+}
+
 func main() {
 	http.HandleFunc("/api/products", handleGetProducts)
 	http.HandleFunc("/api/product/", handleGetProductById)
+	http.HandleFunc("/api/product/health", healthCheck)
 
 	productPort := os.Getenv("PRODUCT_SERVICE_PORT")
 	if productPort == "" {
