@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Antimatterr/psygateway/internal/discovery"
 	"github.com/Antimatterr/psygateway/internal/logger"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -169,10 +170,32 @@ func main() {
 	http.HandleFunc("/api/product/health", healthCheck)
 
 	productPort := os.Getenv("PRODUCT_SERVICE_PORT")
+	consulAddress := os.Getenv("CONSUL_ADDRESS")
+	sd, err := discovery.NewServiceDiscovery(consulAddress)
+
+	if err != nil {
+		logger.Error("Failed to create service discovery")
+	}
+
 	if productPort == "" {
 		logger.Fatal("PRODUCT_SERVICE_PORT environment variable is not set")
 	}
-	logger.Info("Starting products service on :", productPort)
+
+	// Convert port string to int
+	port, err := strconv.Atoi(productPort)
+	if err != nil {
+		logger.Fatal("Invalid USER_SERVICE_PORT", err)
+	}
+
+	//Register the service with consul
+	sd.RegisterService("product-service", "product-service", port, "/api/product/health")
+
+	if err != nil {
+		logger.Fatal("Failed to register product service with consul", err)
+	}
+
+	logger.Info("Product service registerd and started on port", port)
+
 	if err := http.ListenAndServe(":"+productPort, nil); err != nil {
 		logger.Fatal("Server failed to start", err)
 	}

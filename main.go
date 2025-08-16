@@ -67,6 +67,7 @@ func NewGateway(dbURL string, consulAddress string) (*Gateway, error) {
 }
 
 func (g *Gateway) ResolveTarget(route *Route) (string, error) {
+	logger.Info("Resolving target for route", route.PathPattern)
 	if route.UseConsul && route.ServiceName != "" {
 		serviceURL, err := g.serviceDiscovery.GetHealthyService(route.ServiceName)
 		if err != nil {
@@ -246,14 +247,12 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, route *Ro
 	// for now localhost will not work for consul so we have to register the service with host.docker.internal
 	//need to deploy the service to docker in same network as of consul to fix this in dev
 	targetUrlFromDiscovery, err := g.ResolveTarget(route)
-
-	logger.Info("Resolved target URL from consul", targetUrlFromDiscovery, "route", route.PathPattern)
 	if err != nil {
-		http.Error(w, "Failed to resolve target URL fromo consul", http.StatusInternalServerError)
-		logger.Error("Failed to resolve target URL consul ", err)
+		http.Error(w, "Failed to resolve target URL from consul", http.StatusInternalServerError)
+		logger.Error("Failed to resolve target URL consul", err)
 		return
 	}
-	targetUrl, err := g.buildTargetURL(route.TargetURL, r.URL.Path, route.PathPattern)
+	targetUrl, err := g.buildTargetURL(targetUrlFromDiscovery, r.URL.Path, route.PathPattern)
 	if err != nil {
 		http.Error(w, "Failed to build target URL", http.StatusInternalServerError)
 		logger.Error("Failed to build target URL", err)
@@ -261,14 +260,8 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, route *Ro
 	}
 	logger.Info("Proxying request", "Method", r.Method, "Path", r.URL.Path, "Target URL", targetUrl)
 
-	var requestUrl string
-	if targetUrlFromDiscovery != "" {
-		requestUrl = targetUrlFromDiscovery
-	} else {
-		requestUrl = targetUrl
-	}
-	//create new request to backened service
-	proxyRequest, err := http.NewRequest(r.Method, requestUrl, r.Body)
+	//create new request to backend service using the complete target URL
+	proxyRequest, err := http.NewRequest(r.Method, targetUrl, r.Body)
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		logger.Error("Failed to create proxy request", err)

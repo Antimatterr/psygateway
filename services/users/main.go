@@ -126,22 +126,27 @@ func main() {
 		logger.Fatal("Failed to create service discovery client", err)
 	}
 
+	if userPort == "" {
+		logger.Fatal("USER_SERVICE_PORT environment variable is not set", fmt.Errorf("USER_SERVICE_PORT is empty"))
+	}
+
+	// Convert port string to int
+	port, err := strconv.Atoi(userPort)
+	if err != nil {
+		logger.Fatal("Invalid USER_SERVICE_PORT", err)
+	}
+
 	// Register this service with Consul
 	err = sd.RegisterService(
 		"user-service",
-		// "host.docker.internal", // Use host.docker.internal for Docker compatibility
-		"user-service",
-		3000,
+		"user-service", // Use container name for Docker networking
+		port,           // Use the actual port from environment
 		"/api/user/health",
 	)
 	if err != nil {
 		logger.Fatal("Failed to register user service with Consul", err)
 	}
-	logger.Info("User service registered with Consul")
-
-	if userPort == "" {
-		logger.Fatal("USER_SERVICE_PORT environment variable is not set")
-	}
+	logger.Info("User service registered with Consul", "port", port)
 
 	// Create HTTP server
 	server := &http.Server{Addr: ":" + userPort}
